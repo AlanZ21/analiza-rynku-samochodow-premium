@@ -1,1 +1,1 @@
-# analiza-rynku-samochodow-premium
+# Projekt na zaliczenie przedmiotu "Metody Pozyskiwania i Wizualizacji Danych"
