@@ -1,0 +1,1217 @@
+---
+title: "Analiza Rynku Samochodów Premium w Polsce"
+format: 
+  html:
+    #html-math-method: katex
+    theme: 
+      light: lux
+      dark: cyborg
+    smooth-scroll: true
+    toc: true
+    toc-location: left
+    warning: false
+    message: false
+    echo: false
+    self-contained: true
+    self-contained-math: true
+    embed-resources: true
+    lang: pl
+    section-fold: true
+    include-in-header:
+      text: |
+        <style>
+        strong, b { 
+          font-weight: 800 !important; 
+          color: #1a1a1a !important; /* Dla motywu Lux */
+        }
+        .dark strong, .dark b {
+          color: #ffffff !important; /* Dla motywu Cyborg */
+        }
+        </style>
+editor: visual
+editor_options: 
+  chunk_output_type: console
+execute:
+  freeze: auto
+  echo: false
+  message: false
+  warning: false
+  error: true
+---
+
+```{r}
+#| label: ustawienia-globalne
+library(ggplot2)
+library(scales)
+library(viridis)
+library(ggridges)
+library(patchwork)
+library(gt)
+library(dplyr)
+library(stringr)
+library(readr)
+library(rvest)
+library(tidyr)
+library(leaflet)
+library(sf)
+library(geodata)
+library(maps)
+library(plotly)
+library(ggdist)
+
+brand_colors <- c("BMW" = "#1c69d4", "Audi" = "#bb0a30", "Mercedes-Benz" = "#444444")
+
+theme_premium <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold", margin = margin(b = 10)),
+      plot.subtitle = element_text(size = 11, color = "grey40", margin = margin(b = 15)),
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom",
+      strip.background = element_rect(fill = "grey95", color = NA),
+      strip.text = element_text(face = "bold")
+    )
+}
+```
+
+```{r}
+#| label: przygotowanie-danych
+#| message: false
+#| warning: false
+
+file_name <- "otomoto_data.csv"
+
+if (file.exists(file_name)) {
+  cars <- read_csv(file_name, locale = locale(encoding = "UTF-8"))
+  cars <- cars %>% mutate(across(any_of(c("Marka", "Model", "Paliwo", "Skrzynia", "Miasto", "Wojewodztwo")), as.factor))
+  message("DANE WCZYTANE Z PLIKU.")
+} else {
+  message("BRAK PLIKU. URUCHAMIAM SCRAPING...")
+
+  scrape_otomoto_brand <- function(brand_name, base_url, pages = 1:100) {
+    results <- list()
+    
+    for (i in seq_along(pages)) {
+      page_number <- pages[i]
+      message(paste("Scrapowanie:", brand_name, "- strona", page_number))
+      
+      tryCatch({
+        page <- read_html(paste0(base_url, page_number))
+        
+        articles <- page %>% html_nodes(xpath = "//article")
+        
+        if (length(articles) > 0) {
+          page_data <- lapply(articles, function(node) {
+            
+            get_val <- function(xml_node, xpath_query) {
+              val <- xml_node %>% html_node(xpath = xpath_query) %>% html_text()
+              if (is.na(val) || length(val) == 0) return(NA) else return(val)
+            }
+            data.frame(
+              Marka = brand_name,
+              Model = get_val(node, ".//div[2]/div/h2/a"),
+              Cena = get_val(node, ".//div[4]/div[2]/div/h3"),
+              Rok = get_val(node, ".//div[3]/dl/dd[4]"),
+              Paliwo = get_val(node, ".//div[3]/dl/dd[2]"),
+              Skrzynia = get_val(node, ".//div[3]/dl/dd[3]"),
+              Przebieg = get_val(node, ".//div[3]/dl/dd[1]"),
+              Lokalizacja_Raw = get_val(node, ".//div[3]/ul/li[1]/p"),
+              Info = get_val(node, ".//div[2]/p"),
+              stringsAsFactors = FALSE
+            )
+          })
+          results[[i]] <- bind_rows(page_data)
+        }
+        
+        Sys.sleep(runif(1, 1.2, 2.8))
+        
+      }, error = function(e) {
+        message("Błąd na stronie: ", page_number)
+      })
+    }
+    return(bind_rows(results))
+  }
+
+  audi <- scrape_otomoto_brand("Audi", "https://www.otomoto.pl/osobowe/audi?page=")
+  bmw <- scrape_otomoto_brand("BMW", "https://www.otomoto.pl/osobowe/bmw?page=")
+  mercedes <- scrape_otomoto_brand("Mercedes-Benz", "https://www.otomoto.pl/osobowe/mercedes-benz?page=")
+
+  cars <- bind_rows(audi, bmw, mercedes)
+
+  if (nrow(cars) > 0) {
+    cars <- cars %>%
+      distinct() %>%
+      mutate(
+        Model = str_remove(Model, fixed(Marka, ignore_case = TRUE)) %>% str_trim(),
+        Cena = as.numeric(gsub("[^0-9]", "", Cena)),
+        Przebieg = as.numeric(gsub("[^0-9]", "", Przebieg)),
+        Rok = as.integer(Rok),
+        Moc_KM = as.numeric(str_extract(Info, "\\d+(?=\\s*KM)")),
+        Pojemnosc_cm3 = as.numeric(str_extract(Info, "\\d+(?=\\s*cm3)")),
+        Pojemnosc_cm3 = ifelse(is.na(Pojemnosc_cm3), 0, Pojemnosc_cm3),
+        Miasto = str_trim(str_extract(Lokalizacja_Raw, "^[^(]+")),
+        Wojewodztwo = str_extract(Lokalizacja_Raw, "(?<=\\().+?(?=\\))")
+      ) %>%
+      filter(!is.na(Cena), !is.na(Marka)) %>%
+      mutate(across(any_of(c("Marka", "Model", "Paliwo", "Skrzynia", "Miasto", "Wojewodztwo")), as.factor)) %>%
+      select(-Info, -Lokalizacja_Raw)
+  
+    write_csv(cars, file_name)
+    message("Sukces! Dane zapisane do CSV.")
+    } else {
+      message("BŁĄD: SCRAPING NIE ZWRÓCIŁ DANYCH.")
+    }
+}
+
+wszystkie_legendy <- data.frame(
+  Marka = c(
+    rep("Mercedes-Benz", 9), 
+    rep("BMW", 5), 
+    rep("Audi", 5)
+  ),
+  Model = c(
+    "SLR McLaren Coupe", "SLS AMG", "Klasa C C63 AMG Black Series", 
+    "SL 63 AMG IWC Edition", "Klasa G 63 AMG Brabus", "SL 280 Pagoda R113",
+    "SL 63 AMG SPEEDSHIFT", "SL 65 AMG V12", "CL 63 AMG V12 Biturbo",
+    "M5 E60 Hartge", "M3 E30 Standard", "Seria 6 M635CSi E24", "Seria 8 850i V12", "Z3 M", 
+    "Quattro UrQuattro", "R8 Coupé 5.2 FSI", "R8 Spyder", "RS4 Avant", "100 Coupé S"
+  ),
+  Rok = c(
+    2006, 2013, 2012, 2008, 2014, 1970, 2008, 2009, 2010, # MB
+    2006, 1987, 1985, 1993, 1998, # BMW
+    1983, 2011, 2014, 2014, 1974  # Audi
+  ),
+  Cena = c(
+    1899000, 899000, 800000, 419000, 399900, 476000, 365000, 359000, 369000, # MB
+    529000, 297000, 328000, 259000, 318570, # BMW
+    429214, 399525, 349900, 249000, 255000  # Audi
+  ),
+  Moc_KM = c(
+    626, 571, 517, 525, 544, 170, 564, 612, 612, # MB
+    507, 190, 285, 299, 321, # BMW
+    200, 525, 430, 450, 115  # Audi
+  ),
+  Pojemnosc_cm3 = c(
+    5439, 6208, 6208, 6208, 5461, 2778, 5461, 5980, 5981, # MB
+    4999, 2302, 3453, 4988, 3201, # BMW
+    2226, 5204, 4163, 4163, 1900  # Audi
+  ),
+  Przebieg = c(
+    2772, 58000, 14800, 52000, 109113, 58000, 12450, 82235, 52160, # MB
+    11200, 198000, 39760, 92700, 45800, # BMW
+    59000, 37000, 24000, 29457, 9500   # Audi
+  ),
+  Miasto = c(
+    "Katowice", "Straszyn", "Poznań", "Szczecin", "Mikołów", "Łódź", "Płochocin", "Warszawa", "Węgrze", # MB
+    "Wrocław", "Wieliczka", "Kraków", "Dębe Wielkie", "Dębe Wielkie", # BMW
+    "Gdańsk", "Gdańsk", "Borówiec", "Węgrze", "Warszawa" # Audi
+  ),
+  Skrzynia = c(
+    rep("Automatyczna", 9), # MB
+    "Automatyczna", "Manualna", "Manualna", "Automatyczna", "Manualna", # BMW
+    "Manualna", "Automatyczna", "Automatyczna", "Automatyczna", "Manualna" # Audi
+  ),
+  Paliwo = "Benzyna",
+  Is_Icon = TRUE
+)
+
+cars <- dplyr::bind_rows(cars, wszystkie_legendy)
+
+cars <- cars %>%
+  mutate(
+    Is_Icon = case_when(
+      Is_Icon == TRUE ~ TRUE,
+      grepl("M3|M5|M2|M4|RS6|RS4|R8|AMG|Black Series|SLS", Model, ignore.case = TRUE) ~ TRUE,
+      (Rok < 2012 & Cena > 180000) ~ TRUE,
+      TRUE ~ FALSE
+    )
+  )
+
+cars <- cars %>%
+  distinct(Marka, Model, Rok, Cena, Przebieg, .keep_all = TRUE)
+```
+
+::: {style="text-align: center;"}
+BMW • Audi • Mercedes-Benz
+
+*na podstawie danych z serwisu Otomoto.pl*
+:::
+
+## Wprowadzenie do projektu
+
+Rynek samochodów klasy premium w Polsce charakteryzuje się znacznym zróżnicowaniem cenowym oraz ofertowym. Marki takie jak BMW, Audi oraz Mercedes-Benz konkurują ze sobą nie tylko w obrębie podobnych segmentów rynku (D, E, SUV), lecz także pod względem technologii, wizerunku, osiągów oraz kosztów eksploatacji. Pomimo dużej liczby dostępnych ofert, rzeczywiste relacje pomiędzy ceną a cechami pojazdów często pozostają nieoczywiste dla potencjalnych nabywców.
+
+Celem niniejszego projektu jest analiza rynku używanych samochodów marek premium w Polsce na podstawie rzeczywistych ofert sprzedaży publikowanych na portalu Otomoto.pl. Projekt ma na celu identyfikację kluczowych czynników wpływających na ceny pojazdów, porównanie strategii rynkowych poszczególnych marek oraz wskazanie istotnych różnic pomiędzy nimi. Uzyskane wyniki mogą stanowić wsparcie zarówno dla konsumentów planujących zakup samochodu, jak i dla analityków rynku motoryzacyjnego.
+
+Dane wykorzystane w analizie zostały pozyskane samodzielnie poprzez scrapowanie ogłoszeń z serwisu Otomoto.pl, co zapewnia ich aktualność oraz unikalność. Zbiór danych obejmuje około 9 tysięcy ofert, po około 3 tysiące dla każdej z analizowanych marek.
+
+### **Charakterystyka zmiennych**
+
+-   **Marka** - marka samochodu (Audi, BMW, Mercedes-Benz)
+
+-   **Model** - model samochodu
+
+-   **Cena** - cena podana w ogłoszeniu
+
+-   **Rok** - rok, w którym samochód został wyprodukowany
+
+-   **Paliwo** - rodzaj paliwa jakim zasilany jest samochód
+
+-   **Skrzynia** - rodzaj skrzyni znajdującej się w samochodzie (automatyczna, manualna)
+
+-   **Przebieg** - przebieg samochodu
+
+-   **Moc_KM** - moc samochodu wyrażona w koniach mechanicznych
+
+-   **Pojemnosc_cm3** - pojemność silnika samochodu wyrażona w centymetrach sześciennych
+
+-   **Miasto** - miasto, w którym znajduje się samochód z ogłoszenia
+
+-   **Wojewodztwo** - województwo, w którym znajduje się samochód z ogłoszenia
+
+-   **Is_Icon** - zmienna pomocnicza, która oznacza samochody ikoniczne
+
+### **Hipotezy oraz pytania badawcze**
+
+[1. Średnia cena samochodów marki BMW jest wyższa niż Audi i Mercedesa w tym samym segmencie wiekowym.](#h1)
+
+[2. Czy ceny samochodów marek premium bardzo różnią się między miastami?](#h2)
+
+[3. Ceny samochodów w dużych miastach są znacząco wyższe od cen w mniejszych miastach.](#h3)
+
+[4. Czy istnieje zależność między rocznikiem a ceną pojazdu?](#h4)
+
+[5. Starsze samochody z mniejszym przebiegiem osiągają znacznie wyższe ceny.](#h5)
+
+[6. Czy rodzaj paliwa i skrzyni birgów wpływa na cenę pojazdu?](#h6)
+
+[7. Czy moc i pojemność silnika ma duży wpływ na cenę samochodu?](#h7)
+
+## Krajobraz Rynku
+
+W pierwszej części przedstawiono ogólny obraz rynku samochodów marek premium w Polsce.
+
+Na poniższym wykresie przedstawiona jest częstość występowania ogłoszeń każdej z marek w zależności od ceny.
+
+```{r}
+#| label: krajobraz-wykres
+ggplot(cars, aes(x = Cena, y = Marka, fill = Marka)) +
+  geom_density_ridges(alpha = 0.7, scale = 0.95, color = "white") +
+  scale_x_continuous(
+    labels = label_number(suffix = " tys. zł", scale = 1e-3), 
+    limits = c(0, 500000)
+  ) +
+  scale_fill_manual(values = brand_colors) +
+  labs(
+    title = "Struktura cenowa marek premium",
+    subtitle = "Rozkład gęstości ofert w zależności od ceny",
+    x = "Cena rynkowa",
+    y = NULL
+  ) +
+  theme_premium() +
+  theme(legend.position = "none")
+```
+
+Natomiast rozmieszczenie ofert w Polsce obrazuje poniższa mapa.
+
+```{r}
+#| label: mapa-ogloszen
+#| message: false
+#| warning: false
+
+if(!dir.exists("map_data")) dir.create("map_data")
+poland_sf <- gadm(country = "POL", level = 1, path = "map_data") %>% st_as_sf()
+
+wojewodztwa_coords_fix <- data.frame(
+  Wojewodztwo = c("Mazowieckie", "Wielkopolskie", "Małopolskie", "Dolnośląskie", 
+                  "Śląskie", "Pomorskie", "Łódzkie", "Kujawsko-pomorskie", 
+                  "Zachodniopomorskie", "Lubelskie", "Podkarpackie", "Lubuskie", 
+                  "Warmińsko-mazurskie", "Podlaskie", "Świętokrzyskie", "Opolskie"),
+  lat_woj = c(52.2, 52.3, 50.0, 51.1, 50.3, 54.2, 51.7, 53.0, 53.5, 51.2, 49.9, 52.2, 53.8, 53.1, 50.8, 50.6),
+  lng_woj = c(21.0, 16.9, 20.0, 16.4, 19.0, 18.0, 19.4, 18.5, 15.3, 22.8, 22.1, 15.2, 20.9, 23.0, 20.6, 17.9)
+)
+
+pl_cities <- world.cities %>% 
+  filter(country.etc == "Poland") %>%
+  dplyr::select(name, lat, long) %>% 
+  rename(Miasto_ref = name, lng_city = long, lat_city = lat) %>% 
+  mutate(Miasto_clean = iconv(Miasto_ref, to="ASCII//TRANSLIT")) %>%
+  dplyr::distinct(Miasto_clean, .keep_all = TRUE)
+
+cars_geo_full <- cars %>%
+  mutate(
+    Wojewodztwo = case_when(
+      Wojewodztwo %in% c("Kujawsko-pomorskie", "kujawsko-pomorskie") ~ "Kujawsko-Pomorskie",
+      Wojewodztwo %in% c("Warmińsko-mazurskie", "warmińsko-mazurskie") ~ "Warmińsko-Mazurskie",
+      Wojewodztwo == "Lodzkie" ~ "Łódzkie",
+      Wojewodztwo == "Slaskie" ~ "Śląskie",
+      TRUE ~ as.character(Wojewodztwo)
+    ),
+    Miasto_clean = iconv(Miasto, to="ASCII//TRANSLIT")
+  ) %>%
+  left_join(pl_cities, by = "Miasto_clean") %>%
+  left_join(wojewodztwa_coords_fix, by = "Wojewodztwo") %>%
+  mutate(
+    lat_final = coalesce(lat_city, lat_woj),
+    lng_final = coalesce(lng_city, lng_woj),
+    Lokalizacja_Info = ifelse(is.na(lat_city), "Środek Województwa", "Dokładne Miasto")
+  ) %>%
+  filter(!is.na(lat_final))
+
+woj_stats <- cars_geo_full %>%
+  group_by(Wojewodztwo) %>%
+  summarise(Liczba_Ofert = n(), .groups = "drop")
+
+map_polygons <- poland_sf %>%
+  left_join(woj_stats, by = c("NAME_1" = "Wojewodztwo")) %>%
+  mutate(Liczba_Ofert = coalesce(Liczba_Ofert, 0))
+
+pal <- colorNumeric(palette = "YlOrRd", domain = map_polygons$Liczba_Ofert)
+
+leaflet(cars_geo_full) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    data = map_polygons,
+    fillColor = ~pal(Liczba_Ofert),
+    weight = 1, opacity = 1, color = "white", fillOpacity = 0.5,
+    label = ~paste0(NAME_1, ": ", Liczba_Ofert, " ofert"),
+    group = "Kolory Regionów"
+  ) %>%
+  addCircleMarkers(
+    lng = ~lng_final, lat = ~lat_final,
+    radius = 4, color = "#1c69d4", stroke = TRUE, fillOpacity = 0.7,
+    clusterOptions = markerClusterOptions(),
+    popup = ~paste0("<b>", Miasto, "</b> (", Lokalizacja_Info, ")<br>", 
+                    Marka, " ", Model, "<br>", format(Cena, big.mark=" "), " PLN"),
+    group = "Pojedyncze Miasta"
+  ) %>%
+  addLegend(data = map_polygons, pal = pal, values = ~Liczba_Ofert, 
+            title = "Ilość ogłoszeń", position = "bottomright") %>%
+  addLayersControl(
+    overlayGroups = c("Kolory Regionów", "Pojedyncze Miasta"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
+
+ 
+
+Wstępna analiza struktury ogłoszeń wskazuje na zbliżone nasycenie rynku dla wszystkich trzech marek. Wykres gęstości cenowej ujawnia, że większość ofert koncentruje się w przedziale do 250 tys. PLN.
+
+Rozmieszczenie geograficzne ofert pokrywa się z głównymi ośrodkami gospodarczymi Polski. Największa liczba ogłoszeń występuje w województwie mazowieckim oraz w regionach z rozwiniętymi aglomeracjami.
+
+## Porównanie cenowe
+
+::: {#h1}
+**1. Średnia cena samochodów marki BMW jest wyższa niż Audi i Mercedesa w tym samym segmencie wiekowym.**
+:::
+
+Samochody marki BMW mają zazwyczaj bardziej sportowy charakter od samochodów Audi czy Mercedes-Benz. Jest to spowodowane domyślnym napędem na tylną oś, zazwyczaj sztywniejszym zawieszeniem czy też wyższą mocą niż samochody konkurujące w tych samych segmentach. Oferują one także więcej opcji typowych dla samochodów sportowych w podstawowych modelach.
+
+Analiza ma na celu sprawdzenie, czy samochody marki BMW są droższe od samochodów Audi czy Mercedes-Benz przez stawianie na osiągi i sportowe odczucia z prowadzenia samochodów tej marki
+
+```{r}
+#| label: hipoteza-1
+cars %>% 
+  filter(Rok >= 2015) %>% 
+  ggplot(aes(x = factor(Rok), y = Cena, fill = Marka)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  scale_fill_manual(values = brand_colors) +
+  scale_y_continuous(
+    labels = label_number(suffix = " tys. zł", scale = 1e-3, big.mark = " "),
+    limits = c(0, 500000)
+  ) +
+  labs(
+    title = "Porównanie cenowe marek na przestrzeni lat",
+    subtitle = "Analiza modeli wyprodukowanych po 2015 roku",
+    x = "Rok produkcji",
+    y = "Cena [PLN]"
+  ) +
+  theme_premium()
+```
+
+Analiza obejmuje samochody wyprodukowane od 2015 roku, aby skupić się na współczesnych trendach rynkowych. Wykres przedstawia rozkłady cen ofert dla każdej marki w podziale na roczniki.
+
+Z wykresu wynika, że Audi w niemal każdym roczniku charakteryzuje się najniższymi medianami cen. BMW i Mercedes-Benz naprzemiennie zajmują pozycję najdroższej marki, przy czym Mercedes-Benz częściej osiąga wyższe wartości skrajne.
+
+Dla jeszcze lepszego zobrazowania różnic cenowych w poniższa tabela pokazuje zestawienie cenowe rozbite na różne typy paliwa oraz ogólną medianę ceny dla wszystkich modeli każdej z marek również od 2015 roku.
+
+```{r}
+#| label: hipoteza-1-tabela
+
+table_data <- cars %>%
+  filter(Rok >= 2015) %>%
+  group_by(Marka) %>%
+  mutate(Mediana_Globalna = median(Cena, na.rm = TRUE)) %>%
+  ungroup() %>%
+  group_by(Marka, Paliwo) %>%
+  summarise(
+    Liczba = n(),
+    Mediana_S = median(Cena, na.rm = TRUE),
+    Mediana_G = first(Mediana_Globalna),
+    .groups = "drop"
+  ) %>%
+  filter(Liczba > 50) %>%
+  group_by(Marka) %>%
+  mutate(
+    Mediana_Marki_Display = ifelse(row_number() == 1, Mediana_G, NA)
+  ) %>%
+  ungroup()
+
+table_data %>%
+  select(Marka, Paliwo, Liczba, Mediana_S, Mediana_Marki_Display) %>%
+  gt(groupname_col = "Marka") %>%
+  sub_missing(columns = "Mediana_Marki_Display", missing_text = "") %>%
+  fmt_currency(
+    columns = c("Mediana_S", "Mediana_Marki_Display"),
+    currency = "PLN", decimals = 0, sep_mark = " ", placement = "right"
+  ) %>%
+  cols_label(
+    Paliwo = "Rodzaj Paliwa",
+    Liczba = "Liczba Ofert",
+    Mediana_S = "Mediana Segmentu",
+    Mediana_Marki_Display = "Mediana Marki"
+  ) %>%
+  data_color(columns = "Mediana_S", rows = Marka == "Audi", palette = "Reds", alpha = 0.5) %>%
+  data_color(columns = "Mediana_S", rows = Marka == "BMW", palette = "Blues", alpha = 0.5) %>%
+  data_color(columns = "Mediana_S", rows = Marka == "Mercedes-Benz", palette = "Greys", alpha = 0.5) %>%
+  tab_style(style = cell_text(color = "#bb0a30", weight = "bold"), locations = cells_row_groups(groups = "Audi")) %>%
+  tab_style(style = cell_text(color = "#1c69d4", weight = "bold"), locations = cells_row_groups(groups = "BMW")) %>%
+  tab_style(style = cell_text(color = "#444444", weight = "bold"), locations = cells_row_groups(groups = "Mercedes-Benz")) %>%
+  tab_style(
+    style = list(cell_fill(color = "#f9ebeb"), 
+                 cell_text(color = "#bb0a30", weight = "800", size = px(15)),
+                 cell_borders(sides = "all", color = "#f9ebeb", weight = px(0))),
+    locations = cells_body(columns = "Mediana_Marki_Display", rows = Marka == "Audi")
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#ebf2fa"), 
+                 cell_text(color = "#1c69d4", weight = "800", size = px(15)),
+                 cell_borders(sides = "all", color = "#ebf2fa", weight = px(0))),
+    locations = cells_body(columns = "Mediana_Marki_Display", rows = Marka == "BMW")
+  ) %>%
+  tab_style(
+    style = list(cell_fill(color = "#f2f2f2"), 
+                 cell_text(color = "#444444", weight = "800", size = px(15)),
+                 cell_borders(sides = "all", color = "#f2f2f2", weight = px(0))),
+    locations = cells_body(columns = "Mediana_Marki_Display", rows = Marka == "Mercedes-Benz")
+  ) %>%
+  tab_style(
+    style = cell_borders(sides = "left", color = "grey80", weight = px(2)),
+    locations = cells_body(columns = "Mediana_Marki_Display")
+  ) %>%
+  tab_header(title = md("**PORÓWNANIE CENOWE MAREK**")) %>%
+  tab_options(
+    data_row.padding = px(4),
+    row_group.padding = px(6),
+  )
+```
+
+Tabela jednoznacznie potwierdza obserwowane różnice cenowe. Samochody marki Audi są najtańsze. Natomiast postrzeganie marki Mercedes-Benz jako najbardziej luksusowej znajduje faktyczne potwierdzenie w cenach rynkowych. Samochody tej marki są z reguły droższe o 20 tys. złotych.
+
+Analiza wykazała, że jednak to Mercedes-Benz, a nie BMW okazał się najdroższą marką samochodową spośród trzech.
+
+## Geografia i Lokalizacja
+
+::: {#h2}
+**2. Czy ceny samochodów marek premium bardzo różnią się między miastami?**
+:::
+
+Lokalizacja oferty jest jednym z kluczowych, lecz często niedocenianych czynników wpływających na cenę pojazdu. Zarówno różnice w położeniu geograficznym jak i różnice społeczne mogą znacząco wpływać na ceny samochodów.
+
+Analiza ta ma na celu sprawdzenie, czy lokalizacja ogłoszenia rzeczywiście przekłada się na znaczne różnice cenowe w segmencie premium.
+
+```{r}
+#| label: hipoteza-2
+
+top_cities <- cars %>%
+  group_by(Miasto) %>%
+  tally(sort = TRUE) %>%
+  slice_max(n, n = 10, with_ties = FALSE) %>%
+  pull(Miasto)
+
+cars %>% 
+  filter(Miasto %in% top_cities) %>% 
+  ggplot(aes(x = Cena, y = reorder(Miasto, Cena, median), fill = after_stat(x))) +
+  stat_density_ridges(
+    geom = "density_ridges_gradient", 
+    calc_ecdf = TRUE, 
+    quantiles = 2, 
+    quantile_lines = TRUE, 
+    scale = 1, 
+    color = "white"
+  ) +
+  scale_fill_viridis_c(option = "C", guide = "none") +
+  scale_x_continuous(
+    labels = label_number(suffix = " tys. zł", scale = 1e-3),
+    limits = c(0, 750000)
+  ) +
+  labs(
+    title = "Różnice cenowe między miastami",
+    x = "Cena [PLN]",
+    y = NULL
+  ) +
+  theme_premium()
+```
+
+Do analizy wybranych zostało 10 miast z największą ilością ogłoszeń. Wykres pokazuje ilość ogłoszeń w zależności od ceny. Białą pionową linią zaznaczona jest mediana ceny w każdym z miast.
+
+Dane pokazują wyraźne zróżnicowanie cenowe między miastami. Najwyższe mediany odnotowano w Gdańsku i Warszawie, co wynika z dużego udziału młodych aut poleasingowych. Interesującym zjawiskiem jest anomalia Radomia, gdzie ceny są drastycznie niższe niż w innych regionach. Wynika to z dużej koncentracji komisów specjalizujących się w sprzedaży aut sprowadzanych, często o niepewnej historii serwisowej lub powypadkowej.
+
+Poniższa tabela przedstawia konkretne wartości cenowe w tych miastach dla dogłębszego zobrazowania różnic cenowych.
+
+```{r}
+#| label: hipoteza-2-tabela
+
+plot_data <- cars %>%
+  filter(Miasto %in% top_cities)
+
+table_data <- plot_data %>%
+  group_by(Miasto) %>%
+  summarise(
+    Oferty = n(),
+    Mediana = median(Cena, na.rm = TRUE),
+    Srednia = mean(Cena, na.rm = TRUE),
+    Max = max(Cena, na.rm = TRUE)
+  ) %>%
+  arrange(desc(Mediana))
+
+table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Analiza Rynku Samochodów Premium**"),
+  ) %>%
+  fmt_currency(
+    columns = c(Mediana, Srednia, Max),
+    currency = "PLN",
+    sep_mark = " ",
+    decimals = 0
+  ) %>%
+  fmt_integer(columns = Oferty) %>%
+  data_color(
+    columns = Mediana,
+    target_columns = Mediana,
+    palette = "Blues"
+  ) %>%
+  tab_options(
+    table.font.size = px(14),
+    column_labels.font.weight = "bold",
+    row_group.font.weight = "bold",
+    table.width = px(600)
+  ) %>%
+  cols_label(
+    Oferty = "Liczba ofert",
+    Mediana = "Mediana",
+    Srednia = "Średnia",
+    Max = "Cena Max"
+  )
+```
+
+Mediana ceny między miastami potrafi się różnić prawie dwukrotnie między miastami (np. między Gdańskiem a Krakowem).
+
+Wyniki potwierdzają, że lokalizacja nie jest jedynie informacją geograficzną, lecz realnym czynnikiem rynkowym, który należy uwzględniać przy szukaniu ofert samochodowych.
+
+::: {#h3}
+**3. Ceny samochodów w dużych miastach są znacząco wyższe od cen w mniejszych miastach.**
+:::
+
+Duże miasta charakteryzują się wyższą siłą nabywczą, większą liczbą dealerów i salonów samochodowych oraz wyższym udziałem klientów flotowych i leasingowych. Z kolei w mniejszych miastach i na obszarach peryferyjnych ceny często są niższe, co może wynikać zarówno z mniejszego popytu, jak i mniejszej ilości konsumentów zdolnych do zakupu droższych czy nowszych samochodów.
+
+Mam zamiar sprawdzić czy duże metropolie faktycznie znacząco wpływają na zwiększenie cen ofert samochodowych.
+
+```{r}
+#| label: hipoteza-3
+
+metropolie <- c("Warszawa", "Kraków", "Wrocław", "Poznań", "Gdańsk")
+
+cars_hipoteza <- cars %>%
+  filter(
+    grepl("A3|A4|A6", Model, ignore.case = TRUE) | 
+    grepl("Seria 1|Seria 3|Seria 5", Model, ignore.case = TRUE) |
+    grepl("Klasa A|Klasa C|Klasa E", Model, ignore.case = TRUE)
+  ) %>%
+  mutate(
+    Model_Clean = case_when(
+      grepl("A3", Model, ignore.case = TRUE) ~ "Audi A3",
+      grepl("A4", Model, ignore.case = TRUE) ~ "Audi A4",
+      grepl("A6", Model, ignore.case = TRUE) ~ "Audi A6",
+      grepl("Seria 1", Model, ignore.case = TRUE) ~ "BMW 1",
+      grepl("Seria 3", Model, ignore.case = TRUE) ~ "BMW 3",
+      grepl("Seria 5", Model, ignore.case = TRUE) ~ "BMW 5",
+      grepl("Klasa A", Model, ignore.case = TRUE) ~ "Merc A",
+      grepl("Klasa C", Model, ignore.case = TRUE) ~ "Merc C",
+      grepl("Klasa E", Model, ignore.case = TRUE) ~ "Merc E"
+    ),
+    Typ_Miasta = if_else(Miasto %in% metropolie, "Metropolie", "Mniejsze miasta")
+  ) %>%
+  filter(!is.na(Model_Clean))
+
+ggplot(cars_hipoteza, aes(x = Model_Clean, y = Cena, fill = Typ_Miasta)) +
+  geom_boxplot(alpha = 0.8, color = "#2C3E50", outlier.alpha = 0.2) +
+  scale_y_log10(labels = label_number(big.mark = " ", suffix = " zł")) +
+  scale_fill_manual(values = c("Metropolie" = "#1c69d4", "Mniejsze miasta" = "#AED6F1")) +
+  labs(
+    title = "Wpływ wielkości aglomeracji na cenę",
+    x = NULL,
+    y = "Cena",
+    fill = "Lokalizacja:"
+  ) +
+  theme_premium() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+```
+
+Zależność ta przeanalizowana zostanie na trzech wybranych modelach z każdej marki, które są dla siebie bezpośrednią konkurencją. Do analizy jako metropolie wybrane zostały Warszawa, Kraków, Gdańsk, Wrocław i Poznań.
+
+Wykres potwierdza, że ceny samochodów w większych miastach są znacząco wyższe niż w mniejszych miastach. Mniejsze miasta również posiadają oferty na poziomie cenowym większych miast, jednak mediany cen w metropoliach są wyraźnie wyższe.
+
+Analiza pokazuje, że duże miasta faktycznie znacząco wpływają na cenę sprzedawanych samochodów.
+
+## Czas i Deprecjacja
+
+::: {#h4}
+**4. Czy istnieje zależność między rocznikiem a ceną pojazdu?**
+:::
+
+Rok produkcji jest kluczowym predyktorem wartości, jednak rynek premium rządzi się bardziej złożonymi prawami. Wpływ na cenę mają m.in. generacja modelu, zmiany stylistyczne (takie jak facelift), rodzaj jednostek napędowych oraz postrzeganie danego modelu na rynku wtórnym.
+
+Analiza ma na celu pokazać czy zależność między rocznikiem a ceną ma charakter wyłącznie liniowy, czy też występują pewne odstępstwa.
+
+```{r}
+#| label: hipoteza-4
+
+cars_trend <- cars %>% 
+  filter(!is.na(Rok), !is.na(Cena), Rok >= 2000)
+
+ggplot(cars_trend, aes(x = Rok, y = Cena)) +
+  geom_point(alpha = 0.15, color = "#2C3E50", size = 1.2, position = position_jitter(width = 0.3)) +
+  geom_smooth(
+    method = "gam", 
+    formula = y ~ s(x, bs = "cs"), 
+    color = "#E67E22", 
+    fill = "#E67E22", 
+    alpha = 0.15, 
+    linewidth = 1.5
+  ) +
+  scale_y_log10(
+    labels = label_number(suffix = " zł", big.mark = " "),
+    breaks = c(10000, 50000, 200000, 1000000)
+  ) +
+  scale_x_reverse(breaks = seq(2000, 2026, by = 2)) +
+  labs(
+    title = "Rocznik a Cena",
+    x = "Rok produkcji",
+    y = "Cena [PLN]"
+  ) +
+  theme_premium() +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+Wykres przedstawia cenę samochodów na rynku w zależności od ich rocznika. Pomarańczowa linia pokazuje krzywą deprecjacji.
+
+Wykres pokazuje wyraźny trend spadkowy na przestrzeni lat, przedstawiony zarówno pomarańczową linią jak i zagęszczenie ofert.
+
+Poniżej znajduje się porównanie samochodów segmentu E (Audi A6, BMW Serii 5, Mercedes-Benz Klasa E) z silnikami o pojemności dwóch litrów, które przedstawia utratę wartości samochodu w pierwszych 5 latach jego użytkowania, od wyjazdu z salonu, po potencjalną sprzedaż na rynku wtórnym.
+
+```{r}
+#| label: hipoteza-4-utrata-wartosci
+
+model_colors <- c(
+  "Audi A6" = "#bb0a30",
+  "BMW Seria 5" = "#1c69d4",
+  "Mercedes Klasa E" = "#444444"
+)
+
+df_trend_rev <- cars %>%
+  filter(
+    (Marka == "Audi" & grepl("A6", Model)) |
+    (Marka == "BMW" & grepl("Seria 5", Model)) |
+    (Marka == "Mercedes-Benz" & grepl("Klasa E", Model)),
+    Rok >= 2020 & Rok <= 2025
+  ) %>%
+  mutate(Model_Clean = case_when(
+    Marka == "Audi" ~ "Audi A6",
+    Marka == "BMW" ~ "BMW Seria 5",
+    Marka == "Mercedes-Benz" ~ "Mercedes Klasa E"
+  ))
+
+ggplot(df_trend_rev, aes(x = Rok, y = Cena, color = Model_Clean, fill = Model_Clean)) +
+  geom_point(
+    position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.7),
+    alpha = 0.3, 
+    size = 2.5
+  ) +
+  geom_smooth(
+    method = "loess", 
+    span = 0.8, 
+    se = TRUE, 
+    alpha = 0.15, 
+    linewidth = 1.6
+  ) +
+  scale_color_manual(values = model_colors) +
+  scale_fill_manual(values = model_colors) +
+  scale_x_reverse(breaks = 2020:2025) +
+  scale_y_continuous(
+    labels = label_number(suffix = " zł", big.mark = " "),
+    breaks = seq(0, 800000, by = 100000)
+  ) +
+  labs(
+    title = "Analiza utraty wartości (2020-2025)",
+    x = "Rok produkcji",
+    y = "Cena [PLN]",
+    color = "Model",
+    fill = "Model"
+  ) +
+  theme_premium()
+```
+
+Każda kropka jest poszczególną ofertą. Linie pokazują trend cenowy w czasie.
+
+Wykres regresji potwierdza gwałtowny spadek wartości w pierwszych 5–7 latach eksploatacji, gdzie utrata ceny może wynosić nawet 50 tys. PLN rocznie. Można także zauważyć, że pomimo różnicy w cenach początkowych oraz lekkich różnicach pomiędzy utratą wartości przez każdy model, ostatecznie samochody z każdej marki znajdują się w tym samym przedziale cenowym.
+
+Zależność między rocznikiem a ceną jest zatem wyraźna, lecz nie idealnie liniowa, przez wzrastającą wraz z czasem liczba obserwacji odstających.
+
+### Ikony i Legendy
+
+Warto jednak zwrócić uwagę na zjawisko „Ikon Motoryzacji”. Modele takie jak serie M, RS czy AMG po osiągnięciu pewnego wieku (często powyżej 10–15 lat) zaczynają zyskiwać na wartości. W ich przypadku stan techniczny, wyposażenie i rzadkość konfiguracji stają się ważniejsze niż data produkcji, co czyni je atrakcyjnymi aktywami inwestycyjnymi.
+
+```{r}
+#| label: ikony-legendy
+
+cars_plot_data <- cars %>%
+  mutate(
+    Wizualna_Ikona = (Model %in% wszystkie_legendy$Model | Is_Icon == TRUE) & Rok < 2015,
+    Rok_Display = ifelse(Wizualna_Ikona, Rok, Rok + runif(n(), -0.35, 0.35)),
+    Full_Tooltip = paste0(
+      "<b>", Marka, " ", Model, "</b><br>",
+      "Rok: ", Rok, "<br>",
+      "Cena: ", format(Cena / 1000, big.mark = " "), " tys. zł"
+    )
+  )
+
+p_final <- plot_ly()
+
+marki <- c("Audi", "BMW", "Mercedes-Benz")
+
+for(m in marki) {
+  df_m_tlo <- cars_plot_data %>% filter(Marka == m, !Wizualna_Ikona)
+  df_m_ikona <- cars_plot_data %>% filter(Marka == m, Wizualna_Ikona)
+  m_color <- brand_colors[m]
+  
+  p_final <- p_final %>% add_markers(
+    data = df_m_tlo,
+    x = ~Rok_Display,
+    y = ~Cena,
+    name = m,
+    legendgroup = m,
+    showlegend = FALSE,
+    hoverinfo = "none",
+    marker = list(color = "rgba(220, 220, 220, 0.2)", size = 5)
+  )
+  
+  p_final <- p_final %>% add_markers(
+    data = df_m_ikona,
+    x = ~Rok,
+    y = ~Cena,
+    name = m,
+    legendgroup = m,
+    showlegend = TRUE,
+    text = ~Full_Tooltip,
+    hoverinfo = "text",
+    hoverlabel = list(
+      bgcolor = "#F8F9FA", 
+      bordercolor = "#D1D1D1",
+      font = list(color = "#333333", size = 14)
+    ),
+    marker = list(
+      color = m_color, 
+      size = 12, 
+      line = list(color = "white", width = 1.2)
+    )
+  )
+}
+
+p_final <- p_final %>% layout(
+  title = list(
+    text = "<b>Ikony Motoryzacji na tle rynku</b>", 
+    x = 0.05, 
+    font = list(family = "Arial", size = 22)
+  ),
+  xaxis = list(
+    title = list(text = "Rok produkcji", standoff = 20), 
+    range = c(1965, 2026),
+    gridcolor = "#F3F3F3",
+    zeroline = FALSE
+  ),
+  yaxis = list(
+    title = list(text = "Cena", standoff = 45),
+    gridcolor = "#F3F3F3",
+    zeroline = FALSE,
+    tickvals = seq(0, 2000000, by = 250000),
+    ticktext = paste(seq(0, 2000, by = 250), "tys. zł")
+  ),
+  legend = list(
+    orientation = "h", 
+    x = 0.5, 
+    xanchor = "center", 
+    y = -0.2
+  ),
+  margin = list(t = 80, b = 100, l = 120, r = 30),
+  plot_bgcolor = "white",
+  paper_bgcolor = "white"
+) %>% 
+config(
+  displayModeBar = FALSE, 
+  responsive = TRUE,
+  doubleClick = FALSE,
+  showTips = FALSE
+)
+
+p_final
+```
+
+Pod uwagę wzięte zostały samochody do 2015 roku. Każda z kolorowych kropek przedstawia pojedyncze ogłoszenie samochodu kultowego. Reszta ogłoszeń zaznaczona jest jasnym szarym kolorem i stanowi porównawcze tło.
+
+Wykres wyraźnie pokazuje jak cenione są samochody ikoniczne na tle reszty rynku.
+
+Stąd rocznik samochodu nie wskazuje czysto liniowej tendencji spadkowej ceny. Istnieje wiele przypadków, gdzie starsze, ikoniczne samochody są wysoko cenione.
+
+::: {#h5}
+**5. Starsze samochody z mniejszym przebiegiem osiągają znacznie wyższe ceny.**
+:::
+
+Przebieg samochodu jest szczególnie ważną informacją na jego temat. Determinuje on wiele cech, które są krytyczne przy wyborze samochodu. Wysoki przebieg może oznaczać zużyte podzespoły takie jak zawieszenie, jednostka napędowa, czy też słaby stan blacharsko lakierniczy, bądź mocno zużyte wnętrze pojazdu.
+
+Analiza ma wykazać czy niski przebieg (do 150 tys. km.) w starszych samochodach (do 2012 roku) skutkuje podniesieniem ceny ogłoszeń.
+
+```{r}
+#| label: hipoteza-5
+
+cars_final <- cars %>%
+  filter(Rok <= 2012) %>%
+  mutate(
+    Status = factor(ifelse(Przebieg < 150000, "Niski przebieg (<150k)", "Duży przebieg (>150k)"),
+    levels = c("Niski przebieg (<150k)", "Duży przebieg (>150k)")),
+    Marka = factor(Marka, levels = c("Audi", "BMW", "Mercedes-Benz"))
+  )
+
+stats_n <- cars_final %>% 
+  group_by(Marka, Status) %>% 
+  summarise(n = n(), median_val = median(Cena), .groups = 'drop')
+
+ggplot(cars_final, aes(x = Marka, y = Cena, fill = Status)) +
+  stat_halfeye(adjust = .5, width = .6, .width = 0, justification = -.3, point_colour = NA, alpha = 0.5, position = position_dodge(width = 0.9)) +
+  geom_point(aes(color = Status), size = 1.5, alpha = 0.07, position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.9)) +
+  geom_boxplot(width = .15, outlier.shape = NA, alpha = 0.6, color = "grey30", position = position_dodge(width = 0.9)) +
+  scale_y_log10(
+    breaks = c(5000, 20000, 100000, 500000), 
+    labels = c("5 tys.", "20 tys.", "100 tys.", "500 tys.")) +
+  scale_fill_manual(values = c("Niski przebieg (<150k)" = "#2C3E50", "Duży przebieg (>150k)" = "#bb0a30")) +
+  scale_color_manual(values = c("Niski przebieg (<150k)" = "#2C3E50", "Duży przebieg (>150k)" = "#bb0a30")) +
+  labs(
+    title = "Wpływ niskiego przebiegu na cenę samochodu",
+    x = NULL,
+    y = "Cena [PLN]"
+  ) +
+  theme_premium()
+```
+
+Każda kropka przedstawia pojedyncze ogłoszenie. Chmura obok rozkładu cen pokazuje zagęszczenie ofert w zależności od ceny.
+
+Wyniki wskazują, że rynek najsilniej premiuje niski przebieg w przypadku samochodów marki Mercedes-Benz. W tej marce różnica w cenie między autami z małym i dużym przebiegiem jest najbardziej wyraźna. W przypadku Audi korelacja ta jest najsłabsza, co może sugerować, że marka ta jest postrzegana jako najbardziej odporna na duże przebiegi w kontekście długofalowej eksploatacji.
+
+Stąd wynika, że poza samochodami marki Audi, niższy przebieg jest przyczyną wyższych cen, szczególnie w przypadku marki Mercedes-Benz.
+
+## Technologia i Silniki
+
+::: {#h6}
+**6. Czy rodzaj paliwa i skrzyni biegów wpływa na wartość pojazdu?**
+:::
+
+Zmiany regulacyjne oraz zaostrzane regulacje emisyjne wpływają na preferencje kupujących. Stąd rodzaj paliwa jest jednym z pierwszych wyborów jakie czynią konsumenci przy kupnie samochodu. Natomiast skrzynia automatyczna uznawana jest za podstawową cechę samochodu premium.
+
+Celem analizy jest sprawdzenie, czy typ paliwa oraz skrzyni biegów przekłada się na różnice cenowe.
+
+```{r}
+#| label: hipoteza-6
+
+cars_filtered <- cars %>% 
+  mutate( Rodzaj_Napedu = case_when(
+    grepl("plug-in", tolower(Paliwo)) ~ "Hybryda Plug-in",
+    grepl("hybryda", tolower(Paliwo)) ~ "Hybryda",
+    grepl("elektrycz", tolower(Paliwo)) ~ "Elektryczny",
+    grepl("diesel", tolower(Paliwo)) ~ "Diesel",
+    grepl("benzyna", tolower(Paliwo)) ~ "Benzyna", TRUE ~ "Inne" ),
+    Skrzynia_Biegow = trimws(as.character(Skrzynia)) ) %>% 
+  filter(Rodzaj_Napedu != "Inne", Skrzynia_Biegow %in% c("Automatyczna", "Manualna"), !is.na(Cena))
+
+tabela_wynikowa <- cars_filtered %>%
+  group_by(Rodzaj_Napedu, Skrzynia_Biegow) %>%
+  summarise( Liczba_Ofert = n(),
+             Srednia_Cena = mean(Cena, na.rm = TRUE),
+             Mediana_Cena = median(Cena, na.rm = TRUE),
+             .groups = 'drop' ) %>% 
+  filter(Liczba_Ofert > 1) %>% 
+  arrange(desc(Srednia_Cena))
+
+ggplot(tabela_wynikowa, aes(x = Rodzaj_Napedu, y = Srednia_Cena, fill = Skrzynia_Biegow)) + geom_bar(
+  stat = "identity",
+  position = position_dodge(0.8), 
+  width = 0.7, alpha = 0.85) + 
+geom_text(aes(
+  label = paste0(round(Srednia_Cena/1000), "k")), 
+  position = position_dodge(0.8), 
+  vjust = -0.5, 
+  size = 4, 
+  fontface = "bold") + 
+scale_y_continuous(
+  labels = scales::label_number(suffix = " zł", big.mark = " "),
+  expand = expansion(mult = c(0, 0.2))) +
+scale_fill_manual(values = c("Automatyczna" = "#2C3E50", "Manualna" = "#bb0a30")) + 
+labs(
+  title = "Wpływ rodzaju skrzyni i paliwa na wartość",
+  x = NULL,
+  y = "Średnia Cena",
+  fill = "Skrzynia" ) +
+theme_premium() +
+theme(legend.position = "top")
+```
+
+Samochody wyposażone w automatyczną skrzynię biegów osiągają wyższe ceny, niezależnie od marki. Manualne skrzynie występują rzadziej i umieszczone są z reguły w samochodach starszych i tańszych.
+
+Silniki benzynowe osiągają wyższe ceny niż diesle, co może być efektem zmieniających się trendów rynkowych i obaw związanych z przyszłymi regulacjami dla silników wysokoprężnych. Widać to szczególnie po cenach samochodów hybrydowych i elektrycznych, których średnie ceny są znacznie wyższe niż ceny samochodów benzynowych czy diesli. Jest to jednak spowodowane także tym, że samochody te są dosyć nowe na rynku i nie mają starych i tanich egzemplarzy, które zaniżałyby ich ceny.
+
+::: {#h7}
+**7. Czy moc i pojemność silnika ma duży wpływ na cenę samochodu?**
+:::
+
+W segmencie premium parametry techniczne, takie jak moc silnika i pojemność, są nie tylko elementem użytkowym, ale również częścią wizerunku marki. Modele o wyższej mocy są często lepiej wyposażone, zdecydowanie droższe w zakupie jako nowe oraz bardziej pożądane na rynku wtórnym.
+
+Analiza ma na celu ocenę, czy wraz ze wzrostem mocy i pojemności silnika rośnie również cena pojazdu.
+
+```{r}
+#| label: hipoteza-7
+
+cars %>% 
+  filter(Moc_KM < 800, Pojemnosc_cm3 > 0, Pojemnosc_cm3 < 7000) %>% 
+  ggplot(aes(x = Moc_KM, y = Pojemnosc_cm3, size = Cena, fill = Marka)) +
+  geom_point(alpha = 0.6, shape = 21, color = "white", stroke = 0.3) +
+  facet_wrap(~Marka) +
+  scale_size_area(max_size = 12, labels = label_number(suffix = " zł", big.mark = " ")) +
+  scale_fill_manual(values = brand_colors) +
+  labs(
+    title = "Relacja mocy, pojemności i ceny",
+    x = "Moc [KM]",
+    y = "Pojemność [cm3]",
+    size = "Cena"
+  ) +
+  theme_premium() +
+  guides(fill = "none",
+         size = guide_legend(
+           override.aes = list(
+             fill = "grey50",
+             alpha = 0.5,
+             color = "white"
+          )
+        )
+      )
+```
+
+Wykres przedstawia zależność między mocą, pojemnością, a ceną samochodów każdej z marek. Wielkość "bąbelka" odpowiada cenie pojazdu.
+
+Wyraźnie widać korelację między wzrostem pojemności oraz mocy, ze wzrastem cena pojazdu. Samochody marki BMW i Mercedes-Benz są nieznacznie droższe od Audi w przypadku samochodów z silnikami trzy litrowymi. Powyżej tej pojemności to samochody marki Mercedes-Benz z silnikami są dużo droższe niż samochody pozostałych dwóch marek.
+
+Zatem można stwierdzić, że moc i pojemność są najbardziej istotnymi czynnikami wpływającymi na cenę.
+
+Warto również zwrócić uwagę na duże zagęszczenie ofert z silnikami o pojemności do dwóch litrów. Widać to szczególnie w w przypadku marek Audi i Mercedes. Może to wskazywać na zjawisko downsizingu, wprowadzanego na przestrzeni ostatnich lat.
+
+Poniższy wykres przedstawia to zjawisko w czasie (od 1990 do 2026 roku).
+
+```{r}
+#| label: downsizing
+cars %>%
+  filter(Pojemnosc_cm3 > 0, Rok >= 1990) %>%
+  group_by(Rok) %>%
+  summarise(
+    Srednia_Pojemnosc = mean(Pojemnosc_cm3), 
+    Srednia_Moc = mean(Moc_KM),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = Rok)) +
+  geom_area(aes(y = Srednia_Pojemnosc), fill = "#2C3E50", alpha = 0.05) +
+  geom_smooth(aes(y = Srednia_Pojemnosc, color = "Pojemność [cm3]"), 
+              method = "loess", se = FALSE, linewidth = 1.5, span = 0.3) +
+  geom_smooth(aes(y = Srednia_Moc * 10, color = "Moc [KM]"), 
+              method = "loess", se = FALSE, linewidth = 1.2, linetype = "dashed", span = 0.3) +
+  geom_vline(xintercept = 2014, color = "grey40", linetype = "dotted", linewidth = 0.8) +
+  annotate("label", x = 2014, y = 3800, label = "Norma Euro 6", 
+           fill = "white", color = "grey30", fontface = "bold", label.size = NA) +
+  scale_y_continuous(
+    name = "Średnia Pojemność [cm3]",
+    limits = c(0, 4000),
+    sec.axis = sec_axis(~./10, name = "Średnia Moc [KM]")
+  ) +
+  scale_color_manual(values = c("Pojemność [cm3]" = "#20B2AA", "Moc [KM]" = "#E74C3C")) +
+  labs(
+    title = "Zjawisko downsizingu na przestrzeni lat",
+    x = "Rok produkcji",
+    color = ""
+  ) +
+  theme_premium()
+```
+
+Niebieska linia ciągła przedstawia średnią pojemność, czerwona linia przerywana średnią moc. Czarną przerywaną linią zaznaczony jest rok (2014 r.), w którym wprowadzono normę Euro 6, wprowadzającą bardzo restrykcyjne wymogi, głównie odnośnie emisji spalin.
+
+Analiza czasowa ujawnia drastyczny spadek średniej pojemności silników po 2014 roku, co jest bezpośrednim skutkiem wprowadzenia normy Euro 6.
+
+Poniższy wykres przedstawia dokładny trend downsizingu dla każdej z marek na przestrzeni lat 2010 do 2025.
+
+```{r}
+#| label: downsizing-podzial
+
+cars %>%
+  filter(Rok >= 2010 & Rok <= 2025, Moc_KM < 400, Pojemnosc_cm3 > 0) %>%
+  group_by(Marka, Rok) %>%
+  summarise(
+    Srednia_Pojemnosc = mean(Pojemnosc_cm3, na.rm = TRUE),
+    Srednia_Moc = mean(Moc_KM, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = Rok, y = Srednia_Pojemnosc, color = Marka, fill = Marka)) +
+  geom_smooth(method = "loess", se = TRUE, alpha = 0.1, linewidth = 1.2) +
+  geom_point(aes(size = Srednia_Moc), alpha = 0.4) +
+  facet_wrap(~Marka) +
+  scale_color_manual(values = brand_colors) +
+  scale_fill_manual(values = brand_colors) +
+  scale_size_continuous(range = c(2, 7)) +
+  scale_x_continuous(breaks = seq(2010, 2025, 5)) +
+  labs(
+    title = "Realny trend downsizingu (2010-2025)",
+    x = "Rok produkcji",
+    y = "Pojemność [cm3]",
+    size = "Śr. Moc [KM]"
+  ) +
+  theme_premium() +
+  theme(
+    strip.text = element_text(size = 14),
+    panel.spacing = unit(1.5, "lines"),
+    axis.text.x = element_text(angle = 0)
+  ) +
+  guides(
+    color = "none", fill = "none",
+    size = guide_legend(nrow = 1, title.position = "top", label.position = "bottom")
+  )
+```
+
+Zjawisko downsizingu najsilniej dotknęło markę Mercedes-Benz, która zastąpiła duże jednostki mniejszymi, mocno wysilonymi silnikami. BMW jako jedyna z analizowanych marek wykazuje w ostatnich latach lekką tendencję powrotną do oferowania jednostek o większej pojemności w swoich topowych modelach.
+
+Zestawienie to może pomóc w określeniu rozwoju charakteru każdej z marek oraz różnic w strategiach na przestrzeni lat.
+
+## Podsumowanie
+
+Poniższa tabela zestawia kluczowe wskaźniki rynkowe i techniczne analizowanych marek, umożliwiając bezpośrednie porównanie ich charakterystyki na rynku wtórnym.
+
+```{r}
+#| label: tabela-podsumowujaca
+
+cars %>%
+  group_by(Marka) %>%
+  summarise(
+    Ogłoszenia = n(),
+    Mediana_Ceny = median(Cena, na.rm = TRUE),
+    Sr_Pojemnosc = mean(Pojemnosc_cm3[Pojemnosc_cm3 > 0], na.rm = TRUE),
+    Mediana_Pojemnosc = median(Pojemnosc_cm3[Pojemnosc_cm3 > 0], na.rm = TRUE),
+    Sr_Moc = mean(Moc_KM, na.rm = TRUE),
+    Automaty_Proc = mean(Skrzynia == "Automatyczna", na.rm = TRUE) * 100
+  ) %>%
+  gt() %>%
+  tab_header(
+    title = md("**Podsumowanie Rynku Marek Premium**"),
+  ) %>%
+  tab_spanner(label = "Wskaźniki Rynkowe", columns = c(Ogłoszenia, Mediana_Ceny)) %>%
+  tab_spanner(label = "Parametry Techniczne", columns = c(Sr_Pojemnosc, Mediana_Pojemnosc, Sr_Moc, Automaty_Proc)) %>%
+  cols_label(
+    Mediana_Ceny = "Mediana Ceny",
+    Sr_Pojemnosc = "Śr. Pojemność",
+    Mediana_Pojemnosc = "Mediana Pojemności",
+    Sr_Moc = "Średnia Moc (KM)",
+    Automaty_Proc = "Automaty (%)"
+  ) %>%
+  fmt_currency(columns = Mediana_Ceny, currency = "PLN", decimals = 0, sep_mark = " ", placement = "right") %>%
+  fmt_number(columns = c(Sr_Moc, Sr_Pojemnosc, Mediana_Pojemnosc), decimals = 0) %>% 
+  fmt_number(columns = Automaty_Proc, decimals = 1) %>%
+  data_color(
+    columns = Sr_Moc,
+    palette = "Blues",
+    alpha = 0.75
+  ) %>%
+  data_color(
+    columns = Mediana_Ceny,
+    palette = "Reds",
+    alpha = 0.7
+  ) %>%
+  tab_options(
+    table.font.size = px(14),
+    column_labels.font.weight = "bold",
+    heading.title.font.size = px(18),
+    column_labels.border.top.color = "#EEEEEE",
+    column_labels.border.bottom.color = "#333333",
+    column_labels.border.bottom.width = px(1),
+    table_body.border.bottom.color = "#EEEEEE",
+    table.border.bottom.style = "none",
+    table.border.top.style = "none",
+    data_row.padding = px(10)
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(size = px(11), weight = "bold", color = "#666666")
+    ),
+    locations = cells_column_spanners()
+  ) %>%
+  tab_style(
+    style = cell_text(weight = "bold", color = "#333333"),
+    locations = cells_body(columns = Marka)
+  ) %>%
+  cols_align(align = "center", columns = everything())
+```
+
+### Wnioski z analizy
+
+Analiza rynku premium w Polsce pozwala na sformułowanie kilku kluczowych rekomendacji:
+
+-   Mercedes-Benz jest marką najdroższą, co potwierdza istnienie tzw. „premii za markę”, jednak w segmencie kolekcjonerskim samochody tej marki najlepiej trzymają wartość.
+
+-   BMW oferuje najkorzystniejszy stosunek mocy i osiągów do ceny, a także największy wybór samochodów nowych z większymi silnikami.
+
+-   Audi wykazuje największą stabilność cenową przy dużych przebiegach, będąc najbardziej racjonalnym wyborem rynkowym.
+
+-   Szukając okazji cenowych, warto skupić się na mniejszych ośrodkach miejskich, zachowując jednak szczególną ostrożność w regionach o statystycznie zaniżonych cenach (np. Radom).
+
+-   Samochody poleasingowe 2–3-letnie stanowią optymalny wybór ekonomiczny, w przypadku chęci zakupu najnowszych modeli samochodów.
+
+-   Postępujący downsizing znacząco zmienił charakter segmentu premium, zróznicowanie wpływając na popyt każdej z marek.
+
+### Metodologia i źródła
+
+```{=html}
+<p style="text-align: left">
+
+Źródło danych: <a href="https://www.otomoto.pl" target="_blank" style="color: #777;">Otomoto.pl</a> </br>
+
+Technologia wykresów: <a href="https://plotly.com/r/" target="_blank" style="color: #777;">Plotly.com</a> </br>
+
+Analiza i merytoryka: Wiedza własna </br>
+
+Analiza odzwierciedla stan rynku na dzień: 20.01.2026r.
+
+</p>
+```
+
+::: {style="display: flex; justify-content: center; align-items: center; gap: 200px; margin-top: 30px; opacity: 0.8;"}
+<img src="img/r_logo.png" alt="R Project" height="80"/>
+
+<img src="img/ggplot2_logo.png" alt="ggplot2" height="80"/>
+
+<img src="img/otomoto_logo.jpg" alt="Otomoto" height="80"/>
+:::
