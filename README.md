@@ -1,4 +1,8 @@
-# Projekt na zaliczenie przedmiotu "Metody Pozyskiwania i Wizualizacji Danych"
+# Analiza rynku samochodów premium w Polsce
+
+⚠️ **Pełny interaktywny raport HTML**  
+Ze względu na rozmiar pliku HTML, nie jest możliwe jego wyświetlenie bezpośrednio w repo. 
+Pełny raport można obejrzeć tutaj: [Otwórz raport w przeglądarce](https://alanz21.github.io/analiza-rynku-samochodow-premium/AnalizaRynkuSamochodowego.html)
 
 Projekt przedstawia analizę rynku nowych i używanych samochodów marek premium (BMW, Audi, Mercedes-Benz) w Polsce na podstawie rzeczywistych ofert sprzedaży z portalu Otomoto.pl.
 
