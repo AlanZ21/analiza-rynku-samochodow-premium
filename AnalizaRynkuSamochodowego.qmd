@@ -1,5 +1,6 @@
 ---
 title: "Analiza Rynku Samochodów Premium w Polsce"
+author: "Alan Zbucki"
 format: 
   html:
     #html-math-method: katex
@@ -283,9 +284,7 @@ Dane wykorzystane w analizie zostały pozyskane samodzielnie poprzez scrapowanie
 
 [5. Starsze samochody z mniejszym przebiegiem osiągają znacznie wyższe ceny.](#h5)
 
-[6. Czy rodzaj paliwa i skrzyni birgów wpływa na cenę pojazdu?](#h6)
-
-[7. Czy moc i pojemność silnika ma duży wpływ na cenę samochodu?](#h7)
+[6. Czy moc i pojemność silnika ma duży wpływ na cenę samochodu?](#h6)
 
 ## Krajobraz Rynku
 
@@ -304,7 +303,6 @@ ggplot(cars, aes(x = Cena, y = Marka, fill = Marka)) +
   scale_fill_manual(values = brand_colors) +
   labs(
     title = "Struktura cenowa marek premium",
-    subtitle = "Rozkład gęstości ofert w zależności od ceny",
     x = "Cena rynkowa",
     y = NULL
   ) +
@@ -926,64 +924,7 @@ Stąd wynika, że poza samochodami marki Audi, niższy przebieg jest przyczyną 
 ## Technologia i Silniki
 
 ::: {#h6}
-**6. Czy rodzaj paliwa i skrzyni biegów wpływa na wartość pojazdu?**
-:::
-
-Zmiany regulacyjne oraz zaostrzane regulacje emisyjne wpływają na preferencje kupujących. Stąd rodzaj paliwa jest jednym z pierwszych wyborów jakie czynią konsumenci przy kupnie samochodu. Natomiast skrzynia automatyczna uznawana jest za podstawową cechę samochodu premium.
-
-Celem analizy jest sprawdzenie, czy typ paliwa oraz skrzyni biegów przekłada się na różnice cenowe.
-
-```{r}
-#| label: hipoteza-6
-
-cars_filtered <- cars %>% 
-  mutate( Rodzaj_Napedu = case_when(
-    grepl("plug-in", tolower(Paliwo)) ~ "Hybryda Plug-in",
-    grepl("hybryda", tolower(Paliwo)) ~ "Hybryda",
-    grepl("elektrycz", tolower(Paliwo)) ~ "Elektryczny",
-    grepl("diesel", tolower(Paliwo)) ~ "Diesel",
-    grepl("benzyna", tolower(Paliwo)) ~ "Benzyna", TRUE ~ "Inne" ),
-    Skrzynia_Biegow = trimws(as.character(Skrzynia)) ) %>% 
-  filter(Rodzaj_Napedu != "Inne", Skrzynia_Biegow %in% c("Automatyczna", "Manualna"), !is.na(Cena))
-
-tabela_wynikowa <- cars_filtered %>%
-  group_by(Rodzaj_Napedu, Skrzynia_Biegow) %>%
-  summarise( Liczba_Ofert = n(),
-             Srednia_Cena = mean(Cena, na.rm = TRUE),
-             Mediana_Cena = median(Cena, na.rm = TRUE),
-             .groups = 'drop' ) %>% 
-  filter(Liczba_Ofert > 1) %>% 
-  arrange(desc(Srednia_Cena))
-
-ggplot(tabela_wynikowa, aes(x = Rodzaj_Napedu, y = Srednia_Cena, fill = Skrzynia_Biegow)) + geom_bar(
-  stat = "identity",
-  position = position_dodge(0.8), 
-  width = 0.7, alpha = 0.85) + 
-geom_text(aes(
-  label = paste0(round(Srednia_Cena/1000), "k")), 
-  position = position_dodge(0.8), 
-  vjust = -0.5, 
-  size = 4, 
-  fontface = "bold") + 
-scale_y_continuous(
-  labels = scales::label_number(suffix = " zł", big.mark = " "),
-  expand = expansion(mult = c(0, 0.2))) +
-scale_fill_manual(values = c("Automatyczna" = "#2C3E50", "Manualna" = "#bb0a30")) + 
-labs(
-  title = "Wpływ rodzaju skrzyni i paliwa na wartość",
-  x = NULL,
-  y = "Średnia Cena",
-  fill = "Skrzynia" ) +
-theme_premium() +
-theme(legend.position = "top")
-```
-
-Samochody wyposażone w automatyczną skrzynię biegów osiągają wyższe ceny, niezależnie od marki. Manualne skrzynie występują rzadziej i umieszczone są z reguły w samochodach starszych i tańszych.
-
-Silniki benzynowe osiągają wyższe ceny niż diesle, co może być efektem zmieniających się trendów rynkowych i obaw związanych z przyszłymi regulacjami dla silników wysokoprężnych. Widać to szczególnie po cenach samochodów hybrydowych i elektrycznych, których średnie ceny są znacznie wyższe niż ceny samochodów benzynowych czy diesli. Jest to jednak spowodowane także tym, że samochody te są dosyć nowe na rynku i nie mają starych i tanich egzemplarzy, które zaniżałyby ich ceny.
-
-::: {#h7}
-**7. Czy moc i pojemność silnika ma duży wpływ na cenę samochodu?**
+**6. Czy moc i pojemność silnika ma duży wpływ na cenę samochodu?**
 :::
 
 W segmencie premium parametry techniczne, takie jak moc silnika i pojemność, są nie tylko elementem użytkowym, ale również częścią wizerunku marki. Modele o wyższej mocy są często lepiej wyposażone, zdecydowanie droższe w zakupie jako nowe oraz bardziej pożądane na rynku wtórnym.
@@ -991,7 +932,7 @@ W segmencie premium parametry techniczne, takie jak moc silnika i pojemność, 
 Analiza ma na celu ocenę, czy wraz ze wzrostem mocy i pojemności silnika rośnie również cena pojazdu.
 
 ```{r}
-#| label: hipoteza-7
+#| label: hipoteza-6
 
 cars %>% 
   filter(Moc_KM < 800, Pojemnosc_cm3 > 0, Pojemnosc_cm3 < 7000) %>% 
